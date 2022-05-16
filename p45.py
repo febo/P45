@@ -540,7 +540,8 @@ class Node:
         if prediction[1] > 0:
             return prediction[0]
 
-        raise Exception("Could not predict a value")
+        raise Exception(
+            f"Could not predict a value: probabilities={str(dict(probabilities))}")
 
     def probabilities(self, instance):
         """Classify the specified instance, returning the probability of each class value
@@ -593,7 +594,11 @@ class Node:
         # in case the node is a leaf
         if node.is_leaf():
             for value, count in node._distribution.items():
-                probabilities[value] = weight * (count / node._total)
+                if count > 0:
+                    probabilities[value] = weight * (count / node._total)
+
+            if node._total == 0:
+                probabilities[node.attribute] = weight
 
             return probabilities
 
@@ -724,7 +729,7 @@ class Node:
             for child in self.children:
                 child.adjust(data)
 
-    def estimate_with_data(self, data, weights, update=False):
+    def estimate_with_data(self, metadata, data, weights, update=False):
         """Returns the number of estimated errors observed on the specified data, updating
         the values if update=True (default False)
 
@@ -732,6 +737,8 @@ class Node:
 
         Parameters
         ----------
+        metadata : dict
+            The attribute information
         data : DataFrame
             The data to use
         weights : np.array
@@ -756,7 +763,7 @@ class Node:
                 # class value = count
                 distribution = Counter()
 
-                for value in class_attribute.unique():
+                for value in metadata[data.columns[-1]]:
                     distribution[value] = weights[class_attribute == value].sum()
 
                 self._distribution = distribution
@@ -792,7 +799,7 @@ class Node:
                         columns=self.attribute).reset_index(drop=True)
 
                 total += self.children[i].estimate_with_data(
-                    branch_data, updated_weights, update)
+                    metadata, branch_data, updated_weights, update)
 
             return total
 
@@ -914,7 +921,7 @@ def pre_prune(metadata, data, majority, node, weights):
     return node
 
 
-def post_prune(data, node, majority, weights):
+def post_prune(metadata, data, node, majority, weights):
     """Performs a pessimistic prunnig on the newly created subtree, which prunes
     nodes based on an estimated error penalty
 
@@ -929,6 +936,8 @@ def post_prune(data, node, majority, weights):
 
     Parameters
     ----------
+    metadata : dict
+        The attribute information
     data : DataFrame
         The training data
     node : Node
@@ -955,7 +964,7 @@ def post_prune(data, node, majority, weights):
     distribution = Counter()
     leaf_total = 0
 
-    for value in class_attribute.unique():
+    for value in metadata[data.columns[-1]]:
         distribution[value] = weights[class_attribute == value].sum()
         leaf_total += distribution[value]
 
@@ -978,14 +987,14 @@ def post_prune(data, node, majority, weights):
     if selected.is_leaf():
         branch_error = leaf_error
     else:
-        branch_error = selected.estimate_with_data(data, weights)
+        branch_error = selected.estimate_with_data(metadata, data, weights)
 
     if leaf_error <= (subtree_error + 0.1) and leaf_error <= (branch_error + 0.1):
         # replace by a leaf node
         return Node(majority, node.parent, leaf_error, leaf_total, distribution)
     elif branch_error <= (subtree_error + 0.1):
         # replace by the most common branch
-        selected.estimate_with_data(data, weights, True)
+        selected.estimate_with_data(metadata, data, weights, True)
         selected.parent = node.parent
         return selected
 
@@ -1156,7 +1165,7 @@ def build_decision_tree(metadata, data, tree=None, parent_majority=None, weights
 
         # checks whether to prune the node or not
         if PRUNE:
-            node = post_prune(data, node, majority, weights)
+            node = post_prune(metadata, data, node, majority, weights)
 
     # if we are the root node of the tree
     if tree is None:
@@ -1360,6 +1369,52 @@ if __name__ == "__main__":
 
     print("Decision tree:\n")
     tree.to_text()
+
+    print("\n")
+    print(f"\nEvaluation on training data ({len(data)} cases):")
+    print("")
+    print("               Decision Tree     ")
+    print("          -----------------------")
+    print("          Accuracy         Errors")
+    print("")
+
+    y = data.iloc[:, -1]
+    correct = 0
+
+    for index in range(len(data)):
+        prediction = tree.predict(data.iloc[index, :-1])
+
+        if prediction == y[index]:
+            correct += 1
+
+    accuracy = f"{(correct / len(data)) * 100:.2f}%"
+    errors = f"{len(data) - correct}"
+
+    print(f"          {accuracy:>8s}{errors:>15s}")
+
+    if args.test:
+        _, test = load_csv(args.test) if args.csv else load_arff(args.test)
+        print("\n")
+        print(f"\nEvaluation on test data ({len(test)} cases):")
+        print("")
+        print("               Decision Tree     ")
+        print("          -----------------------")
+        print("          Accuracy         Errors")
+        print("")
+
+        y = test.iloc[:, -1]
+        correct = 0
+
+        for index in range(len(test)):
+            prediction = tree.predict(test.iloc[index, :-1])
+
+            if prediction == y[index]:
+                correct += 1
+
+        accuracy = f"{(correct / len(test)) * 100:.2f}%"
+        errors = f"{len(test) - correct}"
+
+        print(f"          {accuracy:>8s}{errors:>15s}")
 
     elapsed = datetime.now() - start
     print("\n\nTime: {:.1f} secs".format(elapsed.total_seconds()))
