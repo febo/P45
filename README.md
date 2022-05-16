@@ -31,7 +31,7 @@ python p45.py
 
 This will display a list of commands and their short description:
 
-```bash
+```
 usage: p45.py [-h] [-m cases] [--seed seed] [--unpruned] [--csv] [-t <test file>] <training file>
 
 P45: A Python C4.5 implementation.
@@ -56,7 +56,7 @@ python p45.py iris.arff
 
 After a successful run, the algorithm produces a decision tree:
 
-```bash
+```
 P45 [Release 1.0]                                      Thu April 7 06:00:00 2022
 -----------------
 
