@@ -15,6 +15,7 @@
 # limitations under the License.
 
 import argparse
+from datetime import datetime
 import math
 import numpy as np
 import pandas as pd
@@ -22,6 +23,7 @@ import random
 
 from collections import Counter
 from datetime import datetime
+from halo import Halo
 from json import load
 from pandas.api.types import is_numeric_dtype
 
@@ -31,8 +33,14 @@ DELTA = 1e-5
 # minumum number of instances for each node
 MINIMUM_INSTANCES = 2
 
+# limit for the minimum number of instances in a continuous interval
+INTERVAL_LIMIT = 25
+
 # correction value used in the threshold and error calculation (based on C4.5)
 EPSILON = 1e-3
+
+# precision correction
+CORRECTION = 1e-10
 
 # values below this are considered zero for gain ratio calculation
 ZERO = 1e-7
@@ -41,7 +49,7 @@ ZERO = 1e-7
 pd.options.mode.chained_assignment = 'raise'
 
 # sets a fixed random seed
-random.seed(1000)
+random.seed(0)
 
 # (dis/en)able the pruning
 PRUNE = True
@@ -79,7 +87,7 @@ def gain_ratio(data, attribute, weights):
         membership = (data.iloc[data[filtered].index, -1] == c)
         S.append(weights[membership & filtered].sum())
 
-    values = list(filter(lambda v: v == v, data[attribute].unique()))
+    values = list(data.loc[filtered, attribute].unique())
     #  number of missing values
     missing = weights[data[attribute].isna()].sum()
     # sum of instances with known values
@@ -120,11 +128,12 @@ def gain_ratio(data, attribute, weights):
         partition_split -= m * np.log2(m)
 
     gain = (length / (length + missing)) * (total_entropy - partition_entropy)
+    gain_ratio = 0 if gain == 0 else gain / partition_split
 
-    return gain / partition_split, gain, partition_split
+    return gain_ratio, gain, partition_split
 
 
-def candidate_thresholds(data, attribute):
+def candidate_thresholds(data, attribute, weights):
     """Generates the candidates threshold values for a continuous attribute
 
     Parameters
@@ -133,6 +142,8 @@ def candidate_thresholds(data, attribute):
         The current data
     attribute : str
         The name of the attribute
+    weights : np.array
+        The instance weights to be used in the length calculation
 
     Returns
     -------
@@ -141,18 +152,28 @@ def candidate_thresholds(data, attribute):
 
     """
 
-    sorted_attribute = np.array(
-        [v for v in data[attribute] if not np.isnan(v)])
-    sorted_attribute.sort()
+    valid = data[attribute].notna()
+    values = list(zip(np.array(data.loc[valid, attribute]), weights[valid]))
+    values.sort()
 
+    length = weights[valid].sum()
+    interval_length = 0
     thresholds = []
-    count = 0
 
-    for s in range(len(sorted_attribute) - 1):
-        count += 1
-        if (sorted_attribute[s] + DELTA) < sorted_attribute[s + 1] and count >= 2 and (len(sorted_attribute) - count) >= 2:
-            thresholds.append(
-                (sorted_attribute[s] + sorted_attribute[s+1]) / 2)
+    # minimum number of instances per interval (according to C4.5)
+    class_values = list(data.iloc[data[valid].index, -1].unique())
+    min_split = 0.1 * (length / len(class_values))
+
+    if min_split <= MINIMUM_INSTANCES:
+        min_split = MINIMUM_INSTANCES
+    elif min_split > INTERVAL_LIMIT:
+        min_split = INTERVAL_LIMIT
+
+    for s in range(len(values) - 1):
+        interval_length += values[s][1]
+        length -= values[s][1]
+        if (values[s][0] + DELTA) < values[s + 1][0] and (interval_length + CORRECTION) >= min_split and (length + CORRECTION) >= min_split:
+            thresholds.append((values[s][0] + values[s + 1][0]) / 2)
 
     return thresholds
 
@@ -179,8 +200,8 @@ def gain_ratio_numeric(data, attribute, weights):
 
     """
 
-    thresholds = candidate_thresholds(
-        data, attribute)  # the list of threshold values
+    # the list of threshold values
+    thresholds = candidate_thresholds(data, attribute, weights)
 
     if len(thresholds) == 0:
         return 0, 0, 0
@@ -190,13 +211,10 @@ def gain_ratio_numeric(data, attribute, weights):
     # saves a copy of the original values
     values = valid_data[attribute].copy()
 
-    #  number of missing values
-    missing = weights[data[attribute].isna()].sum()
     # sum of instances with known outcome
     length = valid_weights.sum()
 
     gain_correction = length / weights.sum()
-    split_correction = missing / weights.sum()
     penalty = np.log2(len(thresholds)) / weights.sum()
     gain_information = []
 
@@ -208,25 +226,13 @@ def gain_ratio_numeric(data, attribute, weights):
         _, gain, split = gain_ratio(valid_data, attribute, valid_weights)
 
         # apply a penalty for evaluating multiple threshold values (based on C4.5)
-        if missing > 0:
-            gain = (gain_correction * gain) - penalty
-            split = (split_correction * split)
-        else:
-            gain -= penalty
+        gain = (gain_correction * gain) - penalty
+        ratio = 0 if gain == 0 or split == 0 else gain / split
 
-        gain_information.append((gain / split, gain))
+        gain_information.append((ratio, gain))
 
-    average_gain = sum([g[1] for g in gain_information]) / len(thresholds)
-    valid_thresholds = []
-
-    for candidate in gain_information:
-        # candidate gain needs to be higher than the average gain
-        if candidate[1] > (average_gain - EPSILON):
-            valid_thresholds.append(candidate[0])
-        else:
-            valid_thresholds.append(0)
-
-    selected = np.argmax(valid_thresholds)
+    thresholds_gain = [g[1] for g in gain_information]
+    selected = np.argmax(thresholds_gain)
 
     return gain_information[selected][0], gain_information[selected][1], thresholds[selected]
 
@@ -272,8 +278,14 @@ def search_best_attribute(data, weights):
         else:
             c = attribute, gain_ratio(data, attribute, weights)
 
-        average_gain += c[1][1]
-        candidates.append(c)
+        # only consider positive gains
+        if c[1][1] > 0:
+            average_gain += c[1][1]
+            candidates.append(c)
+
+    if len(candidates) == 0:
+        # no suitable attribute
+        return None, (0, 0, 0)
 
     average_gain = (average_gain / len(candidates)) - EPSILON
     selected = None
@@ -303,7 +315,7 @@ coefficient_index = 0
 while CF > coefficient_value[coefficient_index]:
     coefficient_index += 1
 
-coefficient = deviation[coefficient_index - coefficient_index] + (deviation[coefficient_index] - deviation[coefficient_index - 1]) * (
+coefficient = deviation[coefficient_index - 1] + (deviation[coefficient_index] - deviation[coefficient_index - 1]) * (
     CF - coefficient_value[coefficient_index - 1]) / (coefficient_value[coefficient_index] - coefficient_value[coefficient_index - 1])
 coefficient = coefficient * coefficient
 
@@ -325,7 +337,9 @@ def estimate_error(total, errors):
 
     """
 
-    if errors < 1e-6:
+    if total == 0:
+        return 0
+    elif errors < 1e-6:
         return total * (1 - math.exp(math.log(CF) / total))
     elif errors < 0.9999:
         v = total * (1 - math.exp(math.log(CF) / total))
@@ -382,7 +396,6 @@ class Node:
         self._error = error
         self._total = total
         self._distribution = distribution
-        self._classes = []
 
         self.level = 0 if parent is None else parent.level + 1
 
@@ -403,6 +416,20 @@ class Node:
         """
 
         return self._classes
+
+    @classes.setter
+    def classes(self, classes):
+        """Set the list of classes that the node (tree) can predict.
+
+        This list is used to determine the order of the classification probabilities.
+
+        Parameters
+        ----------
+        classes : list
+            The list of class values that the node can predict.
+        """
+
+        self._classes = classes
 
     def add(self, node, condition, operator=Operator.EQUAL):
         """Adds a child node
@@ -781,7 +808,7 @@ class Node:
             if not self.children[i].is_leaf():
                 to_index = -1
 
-                for j in range(1, len(self.children)):
+                for j in range(i + 1, len(self.children)):
                     if self.children[j].is_leaf():
                         to_index = j
                         break
@@ -829,7 +856,7 @@ def calculate_majority(class_attribute, weights):
     majority = []
     best = 0
 
-    for value in class_attribute:
+    for value in class_attribute.unique():
         count = weights[class_attribute == value].sum()
 
         if count > best:
@@ -842,15 +869,19 @@ def calculate_majority(class_attribute, weights):
     return majority[random.randrange(len(majority))] if len(majority) > 0 else None
 
 
-def pre_prune(data, node, weights):
+def pre_prune(metadata, data, majority, node, weights):
     """Performs a pre-pruning test to decide whether to replace an internal node by a leaf
     node or not
 
     Parameters
     ----------
+    metadata : dict
+        The attribute information
     data : DataFrame
         The training data
-    Node : Node
+    majority : str
+        The majority class value if the node is replaced by a leaf node
+    node : Node
         The node undergoing pruning
     weights : np.array
         The instance weights to be used in the length calculation
@@ -862,18 +893,20 @@ def pre_prune(data, node, weights):
     """
 
     class_attribute = data.iloc[:, -1]
-    majority = calculate_majority(class_attribute, weights)
-
     length = weights.sum()
-    correct_predictions = 0 if length == 0 else weights[class_attribute == majority].sum(
-    )
+    correct_predictions = 0
+
+    if length > 0:
+        majority = calculate_majority(class_attribute, weights)
+        correct_predictions = weights[class_attribute == majority].sum()
+
     leaf_error = length - correct_predictions
 
     if node.error() >= leaf_error - EPSILON:
-        # class value = count
+        # class value : count
         distribution = Counter()
 
-        for value in class_attribute.unique():
+        for value in metadata[data.columns[-1]]:
             distribution[value] = weights[class_attribute == value].sum()
 
         return Node(majority, node.parent, leaf_error, length, distribution)
@@ -898,7 +931,7 @@ def post_prune(data, node, majority, weights):
     ----------
     data : DataFrame
         The training data
-    Node : Node
+    node : Node
         The node undergoing pruning
     majority : str
         The majority class value if the node is replaced by a leaf node
@@ -959,11 +992,13 @@ def post_prune(data, node, majority, weights):
     return node
 
 
-def build_decision_nodes(data, tree=None, parent_majority=None, weights=None):
+def build_decision_tree(metadata, data, tree=None, parent_majority=None, weights=None):
     """Builds a decision tree
 
     Parameters
     ----------
+    metadata : dict
+        The attribute information
     data : DataFrame
         The training data
     tree : Node
@@ -994,13 +1029,13 @@ def build_decision_nodes(data, tree=None, parent_majority=None, weights=None):
     # if all instance belong to the same class or there is no enough data
     # a leaf node is added
 
-    if is_unique or length <= (MINIMUM_INSTANCES * 2):
+    if is_unique or length < (MINIMUM_INSTANCES * 2):
         correct_predictions = 0 if length == 0 else weights[class_attribute == majority].sum(
         )
         # class value = count
         distribution = Counter()
 
-        for value in class_attribute.unique():
+        for value in metadata[data.columns[-1]]:
             distribution[value] = weights[class_attribute == value].sum()
 
         return Node(majority, tree, length - correct_predictions, length, distribution)
@@ -1016,7 +1051,7 @@ def build_decision_nodes(data, tree=None, parent_majority=None, weights=None):
         # class value = count
         distribution = Counter()
 
-        for value in class_attribute.unique():
+        for value in metadata[data.columns[-1]]:
             distribution[value] = weights[class_attribute == value].sum()
 
         return Node(majority, tree, length - correct_predictions, length, distribution)
@@ -1027,8 +1062,6 @@ def build_decision_nodes(data, tree=None, parent_majority=None, weights=None):
 
     # (count, adjusted count)
     distribution = []
-    # only present if the selected attribute is categorical
-    attribute_values = []
 
     if is_numeric_dtype(data[attribute]):
         # lower partition
@@ -1045,10 +1078,7 @@ def build_decision_nodes(data, tree=None, parent_majority=None, weights=None):
 
         distribution.append((count, adjusted_count))
     else:
-        attribute_values = list(
-            filter(lambda v: v == v, data[attribute].unique()))
-
-        for value in attribute_values:
+        for value in metadata[attribute]:
             count = weights[data[attribute] == value].sum()
             w = count / known_length
             adjusted_count = count + (weights[missing] * w).sum()
@@ -1066,10 +1096,11 @@ def build_decision_nodes(data, tree=None, parent_majority=None, weights=None):
 
     if valid < 2:
         # not enough instances on branches, need to select another attribute
-        return build_decision_nodes(data.drop(columns=attribute),
-                                    tree,
-                                    parent_majority,
-                                    weights)
+        return build_decision_tree(metadata,
+                                   data.drop(columns=attribute),
+                                   tree,
+                                   parent_majority,
+                                   weights)
     else:
         node = Node(attribute, parent=tree)
 
@@ -1086,9 +1117,9 @@ def build_decision_nodes(data, tree=None, parent_majority=None, weights=None):
             updated_weights = updated_weights[partition | missing]
 
             branch_data = data[partition | missing].reset_index(drop=True)
-            child = build_decision_nodes(
-                branch_data, node, majority, updated_weights)
-            node.add(pre_prune(branch_data, child, updated_weights),
+            child = build_decision_tree(
+                metadata, branch_data, node, majority, updated_weights)
+            node.add(pre_prune(metadata, branch_data, majority, child, updated_weights),
                      threshold,
                      Operator.LESS_OR_EQUAL)
 
@@ -1101,14 +1132,14 @@ def build_decision_nodes(data, tree=None, parent_majority=None, weights=None):
             updated_weights = updated_weights[partition | missing]
 
             branch_data = data[partition | missing].reset_index(drop=True)
-            child = build_decision_nodes(
-                branch_data, node, majority, updated_weights)
-            node.add(pre_prune(branch_data, child, updated_weights),
+            child = build_decision_tree(
+                metadata, branch_data, node, majority, updated_weights)
+            node.add(pre_prune(metadata, branch_data, majority, child, updated_weights),
                      threshold,
                      Operator.GREATER)
         else:
             # categorical split
-            for index, value in enumerate(attribute_values):
+            for index, value in enumerate(metadata[attribute]):
                 partition = data[attribute] == value
 
                 updated_weights = weights.copy()
@@ -1118,9 +1149,9 @@ def build_decision_nodes(data, tree=None, parent_majority=None, weights=None):
 
                 branch_data = data[partition | missing].drop(
                     columns=attribute).reset_index(drop=True)
-                child = build_decision_nodes(
-                    branch_data, node, majority, updated_weights)
-                node.add(pre_prune(branch_data, child,
+                child = build_decision_tree(
+                    metadata, branch_data, node, majority, updated_weights)
+                node.add(pre_prune(metadata, branch_data, majority, child,
                          updated_weights), value, Operator.EQUAL)
 
         # checks whether to prune the node or not
@@ -1131,7 +1162,7 @@ def build_decision_nodes(data, tree=None, parent_majority=None, weights=None):
     if tree is None:
         node.adjust(data)
         node.sort()
-        node._classes = class_attribute.unique()
+        node.classes = metadata[data.columns[-1]]
 
     return node
 
@@ -1161,8 +1192,9 @@ def load_arff(path, class_attribute=None):
     # separator identifier
     SEPARATOR = ","
 
-    columns = []    # list of attributes
+    columns = []     # list of attributes
     data_types = []  # data type of the attributes
+    data_domain = []  # domain of the attributes
 
     # opens the file for reading
     file = open(path, "r")
@@ -1182,8 +1214,14 @@ def load_arff(path, class_attribute=None):
 
             if "{" in line and "}" in line:
                 data_types.append(str)
+                start = line.index('{') + 1
+                end = line.index('}', start)
+                data_domain.append([v.strip()
+                                   for v in line[start:end].split(SEPARATOR)])
             else:
                 data_types.append(float)
+                # will determine the low/high value when reading the data
+                data_domain.append([])
 
         # @data
         elif DATA in line:
@@ -1205,7 +1243,55 @@ def load_arff(path, class_attribute=None):
     data = pd.DataFrame(data)
     data[class_attribute] = class_column
 
-    return data
+    # attribute metadata information
+    metadata = {}
+
+    for index, attribute in enumerate(columns):
+        if data_types[index] is float:
+            data_domain[index].append(data[attribute].min())
+            data_domain[index].append(data[attribute].max())
+
+        metadata[attribute] = data_domain[index]
+
+    return metadata, data
+
+
+def load_csv(path, class_attribute=None):
+    """Loads the specified CSV file into a Pandas DataFrame
+
+    Parameters
+    ----------
+    path : str
+        Path to the ARFF file
+
+    Returns
+    -------
+    DataFrame
+        DataFrame representing the content of the ARFF file
+    """
+
+    data = pd.read_csv(path)
+    data = data.replace('?', np.nan)
+
+    class_attribute = data.columns[-1] if class_attribute is None else class_attribute
+    class_column = data.pop(class_attribute)
+    data = pd.DataFrame(data)
+    data[class_attribute] = class_column
+
+    # attribute metadata information
+    metadata = {}
+
+    for attribute in data.columns:
+        data_domain = []
+        if is_numeric_dtype(data[attribute]):
+            data_domain.append(data[attribute].min())
+            data_domain.append(data[attribute].max())
+        else:
+            data_domain = data.loc[data[attribute].notna(), attribute].unique()
+
+        metadata[attribute] = data_domain
+
+    return metadata, data
 
 
 if __name__ == "__main__":
@@ -1221,12 +1307,21 @@ if __name__ == "__main__":
                         type=int,
                         metavar='cases',
                         default=2,
-                        help='minimum number of cases per leaf node')
+                        help='minimum number of cases for at least two branches of a split')
 
-    parser.add_argument('--prune',
-                        type=bool,
-                        default=True,
-                        help='enables/disables pruning')
+    parser.add_argument('--seed',
+                        type=int,
+                        metavar='seed',
+                        default=0,
+                        help='random seed value')
+
+    parser.add_argument('--unpruned',
+                        action='store_true',
+                        help='disables pruning')
+
+    parser.add_argument('--csv',
+                        action='store_true',
+                        help='reads input as a CSV file')
 
     parser.add_argument('-t',
                         type=str,
@@ -1236,16 +1331,35 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
     # sets the algorithm parameters
-    PRUNE = args.prune
+    PRUNE = not args.unpruned
     MINIMUM_INSTANCES = args.m
+    random.seed(args.seed)
 
-    print("P45 [Release 1.0]")
-    print(datetime.today().strftime("%a %b %d %H:%M:%S %Y"))
-    print("-----------------")
+    banner = "P45 [Release 1.0]"
+    timestamp = datetime.today().strftime("%a %b %d %H:%M:%S %Y")
 
-    data = load_arff(args.training)
-    tree = build_decision_nodes(data)
+    print("{}{:>{}s}".format(banner, timestamp, 80 - len(banner)))
+    print("-" * len(banner))
+    print("\n    Options:")
+    print(f"        Pruning={not args.unpruned}")
+    print(f"        Cases={args.m}")
+    print(f"        Seed={args.seed}")
+
+    metadata, data = load_csv(
+        args.training) if args.csv else load_arff(args.training)
+
+    print(f"\nClass specified by attribute '{data.columns[-1]}'")
+    print(
+        f"\nRead {len(data)} cases ({len(metadata) - 1} predictor attributes) from:")
+    print(f"    -> {args.training}")
+    print("")
+
+    start = datetime.now()
+    with Halo(text='Creating decision tree...', spinner='arrow3', color='grey'):
+        tree = build_decision_tree(metadata, data)
 
     print("Decision tree:\n")
     tree.to_text()
-    print("\n\nTime: 0.0 secs")
+
+    elapsed = datetime.now() - start
+    print("\n\nTime: {:.1f} secs".format(elapsed.total_seconds()))
