@@ -93,3 +93,7 @@ import p45
 ```
 
 Then you can you can use the `build_decision_tree` function to create a decision tree. The return of this function is a `Node` object that represents the root node of the tree. From the root node, you can classify new instances by calling the `predict` or `probabilities` functions.
+
+### Limitations
+
+Currently the code can take a while to run when using large datasets. The most likely reason for this is the (over-)use of dataframe operations to slit the data during the recursive tree creation procedure.
