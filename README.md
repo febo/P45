@@ -96,4 +96,4 @@ Then you can you can use the `build_decision_tree` function to create a decision
 
 ### Limitations
 
-Currently the code can take a while to run when using large datasets. The most likely reason for this is the (over-)use of dataframe operations to slit the data during the recursive tree creation procedure.
+Currently the code can take a while to run when using large datasets. The most likely reason for this is the (over-)use of dataframe operations to split the data during the recursive tree creation procedure.
