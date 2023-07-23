@@ -27,6 +27,10 @@ from halo import Halo
 from json import load
 from pandas.api.types import is_numeric_dtype
 
+#---------------------------------#
+# Constants                       #
+#---------------------------------# 
+
 # minimum difference between continuous values
 DELTA = 1e-5
 
@@ -54,13 +58,545 @@ random.seed(0)
 # (dis/en)able the pruning
 PRUNE = True
 
-#
-# Gain Ratio calculation
-# ---------
+#---------------------------------#
+# Metadata                        #
+#---------------------------------# 
+
+class Metadata:
+    """
+    A class that holds the information about the dataset.
+    """
+
+    def __init__(self):
+        self._attributes = []
+        self._domain = {}
+        self._type = {}
+
+    def add(self, name, type, values):
+        """
+        Parameters
+        ----------
+        name : str
+            The name of the attribute to add
+        type : str | float
+            The type of the attribute
+        values:
+            The domain of the attribute. For categorical attributes, this is the
+            list of different values for the attribute; for continuous attributes,
+            this is the [min, max] values
+        """
+
+        self._attributes.append(name)
+        self._domain[name] = values
+
+        if type not in [float, str]:
+            raise Exception(f"Invalid data type found: {type}")
+
+        self._type[name] = type
+
+    def is_numeric(self, attribute):
+        """
+        Parameters
+        ----------
+        attribute : int
+            The index of the attribute
+
+        Returns
+        -------
+        bool
+            True is the attribute type is float; False otherwise
+        """
+
+        return self._type[self._attributes[attribute]] == float
+
+    def is_categorical(self, attribute):
+        """
+        Parameters
+        ----------
+        attribute : int
+            The index of the attribute
+
+        Returns
+        -------
+        bool
+            True is the attribute type is srt; False otherwise
+        """
+
+        return self._type[self._attributes[attribute]] == str
+
+    def index_of(self, attribute, value):
+        """
+        Parameters
+        ----------
+        attribute : int
+            The index of the attribute. The attribute must be categorical
+        value : str
+            The value in the domain of the attribute
+
+        Returns
+        -------
+        int
+            The index of the value in the attribute's domain
+        """
+
+        return self._domain[self._attributes[attribute]].index(value)
+
+    def value_of(self, attribute, index):
+        """
+        Parameters
+        ----------
+        attribute : int
+            The index of the attribute. The attribute must be categorical
+        index : int
+            The index of the value
+
+        Returns
+        -------
+        str
+            The value in the corresonding index
+        """
+
+        return self._domain[self._attributes[attribute]][index]
+
+    def values(self, attribute):
+        """
+        Parameters
+        ----------
+        attribute : int
+            The index of the attribute
+
+        Returns
+        -------
+        list
+            The list of values in the domain of the attribute
+        """
+
+        return self._domain[self._attributes[attribute]]
+
+    def attributes(self):
+        """
+        Returns
+        -------
+        list
+            The list of attribute names
+        """
+
+        return self._attributes
+
+    def index(self, name):
+        """
+        Returns
+        -------
+        int
+            The index of the attribute given its name
+        """
+
+        return self._attributes.index(name)
+
+    def attribute_at(self, index):
+        """
+        Returns
+        -------
+        str
+            The name of the attribute at the specified index
+        """
+
+        return self._attributes[index]
+
+    def length(self):
+        """
+        Returns
+        -------
+        int
+            The number of attributes
+        """
+        return len(self._attributes)
+
+    def attribute_length(self, attribute):
+        """
+        Returns
+        -------
+        int
+            The number of values in the attribute domain
+        """
+
+        return len(self._domain[self._attributes[attribute]])
+
+    def class_length(self):
+        """
+        Returns
+        -------
+        int
+            The number of class values
+        """
+
+        return len(self.class_values())
+
+    def class_values(self):
+        """
+        Returns
+        -------
+        int
+            The number of class values
+        """
+
+        return self._domain[self._attributes[-1]]
+
+    def class_attribute(self, name):
+        """
+        Sets the class attribute
+
+        Parameters
+        ----------
+        name : str
+            The name of the class attribute
+        """
+
+        index = self._attributes.index(name)
+        self._attributes[index] = self._attributes[-1]
+        self._attributes[-1] = name
 
 
-def gain_ratio(data, attribute, weights):
+    def to_numpy(self, dataframe):
+        """
+        Parameters
+        ----------
+        dataframe : DataFrame
+            Panda's dataframe representing the data
+
+        Returns
+        -------
+        numpay.ndarray
+            A numeric represetation of the data
+        """
+
+        data = np.empty((len(dataframe), len(self._attributes)))
+
+        for i, attribute in enumerate(self._attributes):
+            attribute_index = self.index(attribute)
+            if self.is_numeric(attribute_index):
+                data[:, i] = dataframe[attribute].to_numpy(copy=True)
+            elif self.is_categorical(attribute_index):
+                for index, value in enumerate(dataframe[attribute]):
+                    data[index, i] = value if value is np.nan else self.index_of(attribute_index, value)
+            else:
+                raise Exception(
+                    f"Cound not determine type of attribute '{attribute}'")
+
+        return data
+
+#---------------------------------#
+# Data Loaders                    #
+#---------------------------------# 
+
+def load_arff(path, class_attribute=None):
+    """Loads the specified ARFF file into a Pandas DataFrame
+
+    Parameters
+    ----------
+    path : str
+        Path to the ARFF file
+
+    Returns
+    -------
+    DataFrame
+        DataFrame representing the content of the ARFF file
+    """
+
+    # attribute identifier
+    ATTRIBUTE = "@attribute"
+    # data identifier
+    DATA = "@data"
+    # separator identifier
+    SEPARATOR = ","
+
+    columns = []     # list of attributes
+    data_types = []  # data type of the attributes
+    data_domain = [] # domain of the attributes
+
+    # opens the file for reading
+    file = open(path, "r")
+    content = False
+    rows = []
+
+    for line in file:
+        if content:
+            values = line.split(SEPARATOR)
+            rows.append([v.strip() for v in values])
+
+        # @attribute
+        elif ATTRIBUTE in line:
+            start = line.index(' ', line.index(ATTRIBUTE)) + 1
+            end = line.index(' ', start + 1)
+            columns.append(line[start:end].strip())
+
+            if "{" in line and "}" in line:
+                data_types.append(str)
+                start = line.index('{') + 1
+                end = line.index('}', start)
+                data_domain.append([v.strip()
+                                   for v in line[start:end].split(SEPARATOR)])
+            else:
+                data_types.append(float)
+                # will determine the low/high value when reading the data
+                data_domain.append([])
+
+        # @data
+        elif DATA in line:
+            content = True
+
+    # creating the pandas representation
+    data = {}
+
+    for index, data_type in enumerate(data_types):
+        if data_type == str:
+            data[columns[index]] = [np.nan if v[index] == '?' else v[index]
+                                    for v in rows]
+        elif data_type == float:
+            data[columns[index]] = [np.nan if v[index] ==
+                                    '?' else float(v[index]) for v in rows]
+
+    class_attribute = columns[-1] if class_attribute is None else class_attribute
+    class_column = data.pop(class_attribute)
+    data = pd.DataFrame(data)
+    data[class_attribute] = class_column
+
+    # attribute metadata information
+    metadata = Metadata()
+
+    for index, attribute in enumerate(columns):
+        if data_types[index] is float:
+            data_domain[index].append(data[attribute].min())
+            data_domain[index].append(data[attribute].max())
+
+        metadata.add(attribute, data_types[index], data_domain[index])
+    # sets the class attribute
+    metadata.class_attribute(class_attribute)
+
+    return metadata, metadata.to_numpy(data)
+
+
+def load_csv(path, class_attribute=None):
+    """Loads the specified CSV file into a Pandas DataFrame
+
+    Parameters
+    ----------
+    path : str
+        Path to the ARFF file
+
+    Returns
+    -------
+    DataFrame
+        DataFrame representing the content of the ARFF file
+    """
+
+    data = pd.read_csv(path)
+    data = data.replace('?', np.nan)
+
+    class_attribute = data.columns[-1] if class_attribute is None else class_attribute
+    class_column = data.pop(class_attribute)
+    data = pd.DataFrame(data)
+    data[class_attribute] = class_column
+
+    # attribute metadata information
+    metadata = Metadata()
+
+    for attribute in data.columns:
+        if is_numeric_dtype(data[attribute]) and attribute != class_attribute:
+            data_domain = []
+            data_domain.append(data[attribute].min())
+            data_domain.append(data[attribute].max())
+
+            metadata.add(attribute, float, data_domain)
+        else:
+            data_domain = data.loc[data[attribute].notna(), attribute].unique()
+            metadata.add(attribute, str, data_domain.tolist())
+    # sets the class attribute
+    metadata.class_attribute(class_attribute)
+
+    return metadata, metadata.to_numpy(data)
+
+
+#---------------------------------#
+# Gain Ratio calculation          #
+#---------------------------------# 
+
+
+def _gain_ratio(data, attribute, attribute_length, class_length, weights):
     """Calculates the gain ratio of the specified attribute
+
+    Parameters
+    ----------
+    data : np.array
+        The current data
+    attribute : int
+        The index of the attribute
+    attribute_length : int
+        The number of values in the attribute domain
+    class_length : int
+        The number of class values
+    weights : np.array
+        The instance weights to be used in the length calculation
+
+    Returns
+    -------
+    tuple
+        a tuple representing the (gain ratio, gain, split information) of the attribute
+
+    """
+
+    # class distribution
+    distribution = np.zeros(class_length)
+
+    #  number of missing values
+    missing = 0
+    # sum of instances with known values
+    length = 0
+
+    active = weights > 0
+    nan_values = np.isnan(data[:, attribute])
+
+    for index in range(len(active)):
+        # only considers the values that are present in this partition
+        # and not missing
+        if active[index]:
+            if nan_values[index]:
+                missing += weights[index]
+            else:
+                length += weights[index]
+                c = int(data[index, -1]) # class value
+                distribution[c] += weights[index]
+
+    # calculates the entropy of the whole data
+
+    total_entropy = 0
+
+    for s in distribution:
+        p = s / length
+        total_entropy -= (p * np.log2(p))
+
+    # calculates the entropy of the partition based on the attribute
+
+    partition_length = np.zeros(attribute_length)
+    partition_membership = np.zeros((attribute_length, metadata.class_length()))
+
+    for index in range(len(active)):
+        if active[index] and not nan_values[index]:
+            v = int(data[index, attribute]) # value index
+            c = int(data[index, -1])        # class value
+
+            partition_length[v] += weights[index]
+            partition_membership[v, c] += weights[index]
+
+    partition_entropy = 0
+    partition_split = 0
+
+    for v in range(len(partition_length)):
+        if partition_length[v] > 0:
+            entropy = 0
+
+            for c in range(metadata.class_length()):
+                if partition_membership[v, c] > 0:
+                    p = partition_membership[v, c] / partition_length[v]
+                    entropy -= (p * np.log2(p))
+        
+            partition_entropy += (partition_length[v] / length) * entropy
+
+            split = partition_length[v] / (length + missing)
+            partition_split -= split * np.log2(split)
+
+    if missing > 0:
+        m = missing / (length + missing)
+        partition_split -= m * np.log2(m)
+
+    gain = (length / (length + missing)) * (total_entropy - partition_entropy)
+    gain_ratio = 0 if gain == 0 else gain / partition_split
+
+    return gain_ratio, gain, partition_split
+
+def cat_gain_ratio(data, metadata, attribute, weights):
+    """Calculates the gain ratio of the specified attribute
+
+    Parameters
+    ----------
+    data : np.array
+        The current data
+    metadata: Metadata
+        Attribute information
+    attribute : int
+        The index of the attribute
+    weights : np.array
+        The instance weights to be used in the length calculation
+    """
+    return _gain_ratio(data, attribute, metadata.attribute_length(attribute), metadata.class_length(), weights)
+
+def num_gain_ratio(data, metadata, attribute, weights):
+    """Calculates the gain ratio of the specified attribute
+
+    Parameters
+    ----------
+    data : np.array
+        The current data
+    metadata: Metadata
+        Attribute information
+    attribute : int
+        The index of the attribute
+    weights : np.array
+        The instance weights to be used in the length calculation
+
+    Returns
+    -------
+    tuple
+        a tuple representing the (gain ratio, gain, split information) of the attribute
+
+    """
+
+    active = weights > 0
+    nan_values = np.isnan(data[:, attribute])
+
+    values = list()
+    length = 0
+
+    for index in range(len(active)):
+        # only considers the values that are present in this partition
+        # and not missing
+        if active[index]:
+            if nan_values[index]:
+                missing += weights[index]
+            else:
+                length += weights[index]
+                values.append((data[index, attribute], data[index, -1], weights[index]))
+    # sort the valid values
+    values.sort()
+    active_weights = np.asarray([w for _, _, w in values])
+
+    interval_length = 0
+    # the list of threshold values
+    thresholds = []
+
+    # minimum number of instances per interval (according to C4.5)
+    min_split = 0.1 * (length / metadata.class_length())
+
+    if min_split <= MINIMUM_INSTANCES:
+        min_split = MINIMUM_INSTANCES
+    elif min_split > INTERVAL_LIMIT:
+        min_split = INTERVAL_LIMIT
+
+    for s in range(len(values) - 1):
+        interval_length += values[s][1]
+        length -= values[s][1]
+        if (values[s][0] + DELTA) < values[s + 1][0] and (interval_length + CORRECTION) >= min_split and (length + CORRECTION) >= min_split:
+            thresholds.append((values[s][0] + values[s + 1][0]) / 2)
+
+
+    return thresholds
+
+
+def gain_ratio_numeric(data, attribute, weights):
+    """Calculates the gain ratio of the specified numeric attribute
+
+    This function evaluates multiple thresholds values to dynamically discretise the
+    continuous attribute and calculate the gain ratio information.
 
     Parameters
     ----------
@@ -74,107 +610,14 @@ def gain_ratio(data, attribute, weights):
     Returns
     -------
     tuple
-        a tuple representing the (gain ratio, gain, split information) of the attribute
+        a tuple representing the (gain ratio, gain, threshold) of the attribute
 
     """
 
-    # class values present in the data
-    filtered = data[attribute].notna()
-    class_values = list(data.iloc[data[filtered].index, -1].unique())
-    S = []
+    # the list of threshold values
+    thresholds = candidate_thresholds(data, attribute, weights)
 
-    for c in class_values:
-        membership = (data.iloc[data[filtered].index, -1] == c)
-        S.append(weights[membership & filtered].sum())
-
-    values = list(data.loc[filtered, attribute].unique())
-    #  number of missing values
-    missing = weights[data[attribute].isna()].sum()
-    # sum of instances with known values
-    length = weights.sum() - missing
-    total_entropy = 0
-
-    # calculates the entropy of the whole data
-
-    for s in S:
-        p = s / length
-        total_entropy -= (p * np.log2(p))
-
-    # calculates the entropy of the partition based on the attribute
-
-    partition_entropy = 0
-    partition_split = 0
-
-    for v in values:
-        partition = (data[attribute] == v)
-        partition_length = weights[partition].sum()
-        entropy = 0
-
-        for c in class_values:
-            membership = (data.iloc[data[partition].index, -1] == c)
-            count = weights[membership & partition].sum()
-
-            if count > 0:
-                p = count / partition_length
-                entropy -= (p * np.log2(p))
-
-        partition_entropy += (partition_length / length) * entropy
-
-        split = partition_length / (length + missing)
-        partition_split -= split * np.log2(split)
-
-    if missing > 0:
-        m = missing / (length + missing)
-        partition_split -= m * np.log2(m)
-
-    gain = (length / (length + missing)) * (total_entropy - partition_entropy)
-    gain_ratio = 0 if gain == 0 else gain / partition_split
-
-    return gain_ratio, gain, partition_split
-
-
-def candidate_thresholds(data, attribute, weights):
-    """Generates the candidates threshold values for a continuous attribute
-
-    Parameters
-    ----------
-    data : DataFrame
-        The current data
-    attribute : str
-        The name of the attribute
-    weights : np.array
-        The instance weights to be used in the length calculation
-
-    Returns
-    -------
-    list
-        a list of values representing the candidate threshold values
-
-    """
-
-    valid = data[attribute].notna()
-    values = list(zip(np.array(data.loc[valid, attribute]), weights[valid]))
-    values.sort()
-
-    length = weights[valid].sum()
-    interval_length = 0
-    thresholds = []
-
-    # minimum number of instances per interval (according to C4.5)
-    class_values = list(data.iloc[data[valid].index, -1].unique())
-    min_split = 0.1 * (length / len(class_values))
-
-    if min_split <= MINIMUM_INSTANCES:
-        min_split = MINIMUM_INSTANCES
-    elif min_split > INTERVAL_LIMIT:
-        min_split = INTERVAL_LIMIT
-
-    for s in range(len(values) - 1):
-        interval_length += values[s][1]
-        length -= values[s][1]
-        if (values[s][0] + DELTA) < values[s + 1][0] and (interval_length + CORRECTION) >= min_split and (length + CORRECTION) >= min_split:
-            thresholds.append((values[s][0] + values[s + 1][0]) / 2)
-
+    
     return thresholds
 
 
@@ -205,26 +648,17 @@ def gain_ratio_numeric(data, attribute, weights):
 
     if len(thresholds) == 0:
         return 0, 0, 0
-
-    valid_data = data[data[attribute].notna()].copy().reset_index(drop=True)
-    valid_weights = weights[data[attribute].notna()]
-    # saves a copy of the original values
-    values = valid_data[attribute].copy()
-
-    # sum of instances with known outcome
-    length = valid_weights.sum()
-
-    gain_correction = length / weights.sum()
+    
+    gain_correction = length / weights.sum() # using all weights (including missing)
     penalty = np.log2(len(thresholds)) / weights.sum()
     gain_information = []
-
+    
     for t in thresholds:
         # create a binary column representing the threshold division
-        binary_split = ['H' if v > t else 'L' for v in values]
-        valid_data[attribute] = binary_split
-
-        _, gain, split = gain_ratio(valid_data, attribute, valid_weights)
-
+        binary_split = np.asarray([(1, c) if v > t else (0, c) for v, c, _ in values])
+        
+        _, gain, split = _gain_ratio(binary_split, 0, 2, metadata.class_length(), active_weights)
+        
         # apply a penalty for evaluating multiple threshold values (based on C4.5)
         gain = (gain_correction * gain) - penalty
         ratio = 0 if gain == 0 or split == 0 else gain / split
@@ -241,7 +675,7 @@ def gain_ratio_numeric(data, attribute, weights):
 # ---------
 
 
-def search_best_attribute(data, weights):
+def search_best_attribute(data, metadata, predictors, weights):
     """Search for the best attribute to create a decision node
 
     This function searches for the best attribute for a decision node. For each attribute,
@@ -252,6 +686,10 @@ def search_best_attribute(data, weights):
     ----------
     data : DataFrame
         The current data
+    metadata: Metadata
+        Attribute information
+    predictors:
+        Array of available attribute indices
     weights : np.array
         The instance weights to be used in the length calculation
 
@@ -263,20 +701,18 @@ def search_best_attribute(data, weights):
         attributes, it is a tuple (gain ratio, gain, threshold)
     """
 
-    predictors = data.iloc[:, 0:-1]
-
-    if len(predictors.columns) == 0:
+    if len(predictors) == 0:
         # no attributes left to choose
         return None, (0, 0, 0)
 
     candidates = []
     average_gain = 0
 
-    for attribute in predictors.columns:
-        if is_numeric_dtype(data[attribute]):
-            c = attribute, gain_ratio_numeric(data, attribute, weights)
+    for attribute in predictors:
+        if metadata.is_numeric(attribute):
+            c = attribute, num_gain_ratio(data, metadata, attribute, weights)
         else:
-            c = attribute, gain_ratio(data, attribute, weights)
+            c = attribute, cat_gain_ratio(data, metadata, attribute, weights)
 
         # only consider positive gains
         if c[1][1] > 0:
@@ -849,21 +1285,21 @@ def calculate_majority(class_attribute, weights):
 
     Parameters
     ----------
-    class_attribute : Series
+    class_attribute : np.array
         The class values of the instances
     weights : np.array
         The instance weights to be used in the majority calculation
 
     Returns
     -------
-    str
+    int
         the majority class value
     """
 
     majority = []
     best = 0
 
-    for value in class_attribute.unique():
+    for value in np.unique(class_attribute):
         count = weights[class_attribute == value].sum()
 
         if count > best:
@@ -1001,21 +1437,23 @@ def post_prune(metadata, data, node, majority, weights):
     return node
 
 
-def build_decision_tree(metadata, data, tree=None, parent_majority=None, weights=None):
+def build_decision_tree(data, metadata, tree=None, parent_majority=None, weights=None, attributes=None):
     """Builds a decision tree
 
     Parameters
     ----------
+    data : numpy.array
+        The training data
     metadata : dict
         The attribute information
-    data : DataFrame
-        The training data
     tree : Node
         The parent node
     parent_majority : str
         The majority class value of the parent
     weights : np.array
         The instance weights to be used in the length calculation
+    attributes : np.array
+        The available attributes flag
 
     Returns
     -------
@@ -1027,7 +1465,11 @@ def build_decision_tree(metadata, data, tree=None, parent_majority=None, weights
         # initializes the weights of the instances
         weights = np.ones(len(data))
 
-    class_attribute = data.iloc[:, -1]
+    if attributes is None:
+        # initiazes the available attributes
+        attributes = np.full(len(metadata.attributes()), True)
+
+    class_attribute = data[:, -1]
     is_unique = len(class_attribute.unique()) == 1
     length = weights.sum()
 
@@ -1039,15 +1481,14 @@ def build_decision_tree(metadata, data, tree=None, parent_majority=None, weights
     # a leaf node is added
 
     if is_unique or length < (MINIMUM_INSTANCES * 2):
-        correct_predictions = 0 if length == 0 else weights[class_attribute == majority].sum(
-        )
+        correct = 0 if length == 0 else weights[class_attribute == majority].sum()
         # class value = count
         distribution = Counter()
 
-        for value in metadata[data.columns[-1]]:
+        for value in range(metadata.class_length()):
             distribution[value] = weights[class_attribute == value].sum()
 
-        return Node(majority, tree, length - correct_predictions, length, distribution)
+        return Node(majority, tree, length - correct, length, distribution)
 
     # search the best attribute for a split
 
@@ -1055,40 +1496,39 @@ def build_decision_tree(metadata, data, tree=None, parent_majority=None, weights
 
     if attribute == None:
         # adds a leaf node, could not select an attribute
-        correct_predictions = 0 if length == 0 else weights[class_attribute == majority].sum(
-        )
+        correct = 0 if length == 0 else weights[class_attribute == majority].sum()
         # class value = count
         distribution = Counter()
 
-        for value in metadata[data.columns[-1]]:
+        for value in range(metadata.class_length()):
             distribution[value] = weights[class_attribute == value].sum()
 
-        return Node(majority, tree, length - correct_predictions, length, distribution)
+        return Node(majority, tree, length - correct, length, distribution)
 
     # adjusts the instance weights based on missing values
-    missing = data[attribute].isna()
+    missing = data[:, attribute].isna()
     known_length = length - weights[missing].sum()
 
     # (count, adjusted count)
     distribution = []
 
-    if is_numeric_dtype(data[attribute]):
+    if metadata.is_numeric(attribute):
         # lower partition
-        count = weights[data[attribute] <= info[2]].sum()
+        count = weights[data[:, attribute] <= info[2]].sum()
         w = count / known_length
         adjusted_count = count + (weights[missing] * w).sum()
 
         distribution.append((count, adjusted_count))
 
         # upper partition
-        count = weights[data[attribute] > info[2]].sum()
+        count = weights[data[:, attribute] > info[2]].sum()
         w = count / known_length
         adjusted_count = count + (weights[missing] * w).sum()
 
         distribution.append((count, adjusted_count))
     else:
-        for value in metadata[attribute]:
-            count = weights[data[attribute] == value].sum()
+        for value in range(metadata.length(attribute)):
+            count = weights[data[:, attribute] == value].sum()
             w = count / known_length
             adjusted_count = count + (weights[missing] * w).sum()
 
@@ -1104,62 +1544,65 @@ def build_decision_tree(metadata, data, tree=None, parent_majority=None, weights
     node = None
 
     if valid < 2:
+        attributes[attribute] = False
         # not enough instances on branches, need to select another attribute
         return build_decision_tree(metadata,
-                                   data.drop(columns=attribute),
+                                   data,
                                    tree,
                                    parent_majority,
-                                   weights)
+                                   weights,
+                                   attributes)
     else:
         node = Node(attribute, parent=tree)
 
-        if is_numeric_dtype(data[attribute]):
+        if metadata.is_numeric(attribute):
             # continuous threshold value
             threshold = info[2]
 
             # slice if the data where the value <= threshold (lower)
-            partition = data[attribute] <= threshold
+            partition = data[:, attribute] <= threshold
 
             updated_weights = weights.copy()
             updated_weights[missing] = updated_weights[missing] * \
                 (distribution[0][0] / known_length)
             updated_weights = updated_weights[partition | missing]
 
-            branch_data = data[partition | missing].reset_index(drop=True)
+            #branch_data = data[partition | missing]
             child = build_decision_tree(
-                metadata, branch_data, node, majority, updated_weights)
+                metadata, data, node, majority, updated_weights, attributes)
             node.add(pre_prune(metadata, branch_data, majority, child, updated_weights),
                      threshold,
                      Operator.LESS_OR_EQUAL)
 
             # slice if the data where the value > threshold (upper)
-            partition = data[attribute] > threshold
+            partition = data[:, attribute] > threshold
 
             updated_weights = weights.copy()
             updated_weights[missing] = updated_weights[missing] * \
                 (distribution[1][0] / known_length)
             updated_weights = updated_weights[partition | missing]
 
-            branch_data = data[partition | missing].reset_index(drop=True)
+            branch_data = data[partition | missing]
             child = build_decision_tree(
-                metadata, branch_data, node, majority, updated_weights)
+                metadata, branch_data, node, majority, updated_weights, attributes)
             node.add(pre_prune(metadata, branch_data, majority, child, updated_weights),
                      threshold,
                      Operator.GREATER)
         else:
             # categorical split
-            for index, value in enumerate(metadata[attribute]):
-                partition = data[attribute] == value
+            for value in range(metadata.length(attribute)):
+                partition = data[:, attribute] == value
 
                 updated_weights = weights.copy()
                 updated_weights[missing] = updated_weights[missing] * \
                     (distribution[index][0] / known_length)
                 updated_weights = updated_weights[partition | missing]
 
-                branch_data = data[partition | missing].drop(
-                    columns=attribute).reset_index(drop=True)
+                branch_data = data[partition | missing]
+                attributes[attribute] = False
+
                 child = build_decision_tree(
-                    metadata, branch_data, node, majority, updated_weights)
+                    metadata, branch_data, node, majority, updated_weights, attributes)
                 node.add(pre_prune(metadata, branch_data, majority, child,
                          updated_weights), value, Operator.EQUAL)
 
@@ -1175,132 +1618,7 @@ def build_decision_tree(metadata, data, tree=None, parent_majority=None, weights
 
     return node
 
-#
-# Loaders
-# ---------
-
-
-def load_arff(path, class_attribute=None):
-    """Loads the specified ARFF file into a Pandas DataFrame
-
-    Parameters
-    ----------
-    path : str
-        Path to the ARFF file
-
-    Returns
-    -------
-    DataFrame
-        DataFrame representing the content of the ARFF file
-    """
-
-    # attribute identifier
-    ATTRIBUTE = "@attribute"
-    # data identifier
-    DATA = "@data"
-    # separator identifier
-    SEPARATOR = ","
-
-    columns = []     # list of attributes
-    data_types = []  # data type of the attributes
-    data_domain = []  # domain of the attributes
-
-    # opens the file for reading
-    file = open(path, "r")
-    content = False
-    rows = []
-
-    for line in file:
-        if content:
-            values = line.split(SEPARATOR)
-            rows.append([v.strip() for v in values])
-
-        # @attribute
-        elif ATTRIBUTE in line:
-            start = line.index(' ', line.index(ATTRIBUTE)) + 1
-            end = line.index(' ', start + 1)
-            columns.append(line[start:end].strip())
-
-            if "{" in line and "}" in line:
-                data_types.append(str)
-                start = line.index('{') + 1
-                end = line.index('}', start)
-                data_domain.append([v.strip()
-                                   for v in line[start:end].split(SEPARATOR)])
-            else:
-                data_types.append(float)
-                # will determine the low/high value when reading the data
-                data_domain.append([])
-
-        # @data
-        elif DATA in line:
-            content = True
-
-    # creating the pandas representation
-    data = {}
-
-    for index, data_type in enumerate(data_types):
-        if data_type == str:
-            data[columns[index]] = [np.nan if v[index] == '?' else v[index]
-                                    for v in rows]
-        elif data_type == float:
-            data[columns[index]] = [np.nan if v[index] ==
-                                    '?' else float(v[index]) for v in rows]
-
-    class_attribute = columns[-1] if class_attribute is None else class_attribute
-    class_column = data.pop(class_attribute)
-    data = pd.DataFrame(data)
-    data[class_attribute] = class_column
-
-    # attribute metadata information
-    metadata = {}
-
-    for index, attribute in enumerate(columns):
-        if data_types[index] is float:
-            data_domain[index].append(data[attribute].min())
-            data_domain[index].append(data[attribute].max())
-
-        metadata[attribute] = data_domain[index]
-
-    return metadata, data
-
-
-def load_csv(path, class_attribute=None):
-    """Loads the specified CSV file into a Pandas DataFrame
-
-    Parameters
-    ----------
-    path : str
-        Path to the ARFF file
-
-    Returns
-    -------
-    DataFrame
-        DataFrame representing the content of the ARFF file
-    """
-
-    data = pd.read_csv(path)
-    data = data.replace('?', np.nan)
-
-    class_attribute = data.columns[-1] if class_attribute is None else class_attribute
-    class_column = data.pop(class_attribute)
-    data = pd.DataFrame(data)
-    data[class_attribute] = class_column
-
-    # attribute metadata information
-    metadata = {}
-
-    for attribute in data.columns:
-        data_domain = []
-        if is_numeric_dtype(data[attribute]):
-            data_domain.append(data[attribute].min())
-            data_domain.append(data[attribute].max())
-        else:
-            data_domain = data.loc[data[attribute].notna(), attribute].unique()
-
-        metadata[attribute] = data_domain
-
-    return metadata, data
+# CLI entry point
 
 
 if __name__ == "__main__":
@@ -1339,7 +1657,7 @@ if __name__ == "__main__":
                         help='test file')
 
     args = parser.parse_args()
-    # sets the algorithm parameters
+    # sets the algorithm parameterss
     PRUNE = not args.unpruned
     MINIMUM_INSTANCES = args.m
     random.seed(args.seed)
@@ -1357,9 +1675,9 @@ if __name__ == "__main__":
     metadata, data = load_csv(
         args.training) if args.csv else load_arff(args.training)
 
-    print(f"\nClass specified by attribute '{data.columns[-1]}'")
+    print(f"\nClass specified by attribute '{metadata.attributes()[-1]}'")
     print(
-        f"\nRead {len(data)} cases ({len(metadata) - 1} predictor attributes) from:")
+        f"\nRead {len(data)} cases ({len(metadata.attributes()) - 1} predictor attributes) from:")
     print(f"    -> {args.training}")
     print("")
 
@@ -1418,3 +1736,4 @@ if __name__ == "__main__":
 
     elapsed = datetime.now() - start
     print("\n\nTime: {:.1f} secs".format(elapsed.total_seconds()))
+    
