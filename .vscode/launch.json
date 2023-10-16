@@ -1,0 +1,13 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Python: Current File",
+            "type": "python",
+            "request": "launch",
+            "program": "p45.py",
+            "console": "integratedTerminal",
+            "args": ["-t",  "/Users/febo/Documents/uok/uci/folds/credit-g/TS00_german.arff", "/Users/febo/Documents/uok/uci/folds/credit-g/TR00_german.arff"]
+        }
+    ]
+}

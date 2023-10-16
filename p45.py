@@ -836,6 +836,221 @@ class Node:
                     self.conditions[i] = condition
                     self.operators[i] = operator
 
+class Metadata:
+    """
+    A class that holds the information about the dataset.
+    """
+
+    def __init__(self):
+        self._attributes = []
+        self._domain = {}
+        self._type = {}
+
+    def add(self, attribute, type, values):
+        """
+        Parameters
+        ----------
+        attribute : str
+            The name of the attribute to add
+        type : str | float
+            The type of the attribute
+        values:
+            The domain of the attribute. For categorical attributes, this is the
+            list of different values for the attribute; for continuous attributes,
+            this is the [min, max] values
+        """
+
+        self._attributes.append(attribute)
+        self._domain[attribute] = values
+
+        if type not in [float, str]:
+            raise Exception(f"Invalid data type found: {type}")
+
+        self._type[attribute] = type
+
+    def is_numeric(self, attribute):
+        """
+        Parameters
+        ----------
+        attribute : int
+            The index of the attribute
+
+        Returns
+        -------
+        bool
+            True is the attribute type is float; False otherwise
+        """
+
+        return self._type[self._attributes[attribute]] == float
+
+    def is_categorical(self, attribute):
+        """
+        Parameters
+        ----------
+        attribute : int
+            The index of the attribute
+
+        Returns
+        -------
+        bool
+            True is the attribute type is srt; False otherwise
+        """
+
+        return self._type[self._attributes[attribute]] == str
+
+    def index_of(self, attribute, value):
+        """
+        Parameters
+        ----------
+        attribute : int
+            The index of the attribute. The attribute must be categorical
+        value : str
+            The value in the domain of the attribute
+
+        Returns
+        -------
+        int
+            The index of the value in the attribute's domain
+        """
+
+        return self._domain[self._attributes[attribute]].index(value)
+
+    def value_of(self, attribute, index):
+        """
+        Parameters
+        ----------
+        attribute : int
+            The index of the attribute. The attribute must be categorical
+        index : int
+            The index of the value
+
+        Returns
+        -------
+        str
+            The value in the corresonding index
+        """
+
+        return self._domain[self._attributes[attribute]][index]
+
+    def values(self, attribute):
+        """
+        Parameters
+        ----------
+        attribute : int
+            The index of the attribute
+
+        Returns
+        -------
+        list
+            The list of values in the domain of the attribute
+        """
+
+        return self._domain[attribute]
+
+    def attributes(self):
+        """
+        Returns
+        -------
+        list
+            The list of attributes
+        """
+
+        return self._attributes
+
+    def attribute(self, index):
+        """
+        Returns
+        -------
+        str
+            The name of the attribute at the specified index
+        """
+
+        return self._attributes[index]
+
+    def length(self):
+        """
+        Returns
+        -------
+        int
+            The number of attributes
+        """
+        return len(self._attributes)
+
+    def attribute_length(self, attribute):
+        """
+        Returns
+        -------
+        int
+            The number of values in the attribute domain
+        """
+
+        return len(self._domain[self._attributes[attribute]])
+
+    def class_length(self):
+        """
+        Returns
+        -------
+        int
+            The number of class values
+        """
+
+        return len(self.values(self._attributes[-1]))
+
+    def to_numpy(self, dataframe):
+        """
+        Parameters
+        ----------
+        dataframe : DataFrame
+            Panda's dataframe representing the data
+
+        Returns
+        -------
+        numpay.ndarray
+            A numeric represetation of the data
+        """
+
+        data = np.empty((len(dataframe), len(self._attributes)))
+
+        for i, attribute in enumerate(self._attributes):
+            if self.is_numeric(attribute):
+                data[:, i] = dataframe[attribute].to_numpy(copy=True)
+            elif self.is_categorical(attribute):
+                for index, value in enumerate(dataframe[attribute]):
+                    data[index, i] = self.index_of(attribute, value)
+            else:
+                raise Exception(
+                    f"Cound not determine type of attribute '{attribute}'")
+
+        return data
+
+class Instances:
+    def __init__(self, length):
+        value = np.empty((), dtype="bool,float")
+        value[()] = (True, 1.0)
+        self._instances = np.full(length, value, dtype="bool,float")
+
+    def weight(self, index):
+        return self._instances[index][1]
+
+    def set_weight(self, index, weight):
+        self._instances[index][1] = weight
+
+    def enabled(self, index):
+        return self._instances[index][0]
+
+    def set_enabled(self, index, enabled):
+        self._instances[index][1] = enabled
+
+    def length(self):
+        return np.add.reduce(self._instances, where=np.where(self._instances[0], self._instances[1], 0))
+
+    def copy(self):
+        clone = Instances(0)
+        clone._instances = self._instances.copy()
+        return clone
+
+    __copy__ = copy 
+
 #
 # Building the tree
 # ---------
@@ -849,21 +1064,21 @@ def calculate_majority(class_attribute, weights):
 
     Parameters
     ----------
-    class_attribute : Series
+    class_attribute : np.array
         The class values of the instances
     weights : np.array
         The instance weights to be used in the majority calculation
 
     Returns
     -------
-    str
+    int
         the majority class value
     """
 
     majority = []
     best = 0
 
-    for value in class_attribute.unique():
+    for value in np.unique(class_attribute):
         count = weights[class_attribute == value].sum()
 
         if count > best:
@@ -1001,14 +1216,14 @@ def post_prune(metadata, data, node, majority, weights):
     return node
 
 
-def build_decision_tree(metadata, data, tree=None, parent_majority=None, weights=None):
+def build_decision_tree(metadata, data, tree=None, parent_majority=None, weights=None, attributes=None):
     """Builds a decision tree
 
     Parameters
     ----------
     metadata : dict
         The attribute information
-    data : DataFrame
+    data : numpy.array
         The training data
     tree : Node
         The parent node
@@ -1016,6 +1231,8 @@ def build_decision_tree(metadata, data, tree=None, parent_majority=None, weights
         The majority class value of the parent
     weights : np.array
         The instance weights to be used in the length calculation
+    attributes : np.array
+        The available attributes flag
 
     Returns
     -------
@@ -1027,7 +1244,11 @@ def build_decision_tree(metadata, data, tree=None, parent_majority=None, weights
         # initializes the weights of the instances
         weights = np.ones(len(data))
 
-    class_attribute = data.iloc[:, -1]
+    if attributes is None:
+        # initiazes the available attributes
+        attributes = np.full(len(metadata.attributes()), True)
+
+    class_attribute = data[:, -1]
     is_unique = len(class_attribute.unique()) == 1
     length = weights.sum()
 
@@ -1039,15 +1260,14 @@ def build_decision_tree(metadata, data, tree=None, parent_majority=None, weights
     # a leaf node is added
 
     if is_unique or length < (MINIMUM_INSTANCES * 2):
-        correct_predictions = 0 if length == 0 else weights[class_attribute == majority].sum(
-        )
+        correct = 0 if length == 0 else weights[class_attribute == majority].sum()
         # class value = count
         distribution = Counter()
 
-        for value in metadata[data.columns[-1]]:
+        for value in range(metadata.class_length()):
             distribution[value] = weights[class_attribute == value].sum()
 
-        return Node(majority, tree, length - correct_predictions, length, distribution)
+        return Node(majority, tree, length - correct, length, distribution)
 
     # search the best attribute for a split
 
@@ -1055,40 +1275,39 @@ def build_decision_tree(metadata, data, tree=None, parent_majority=None, weights
 
     if attribute == None:
         # adds a leaf node, could not select an attribute
-        correct_predictions = 0 if length == 0 else weights[class_attribute == majority].sum(
-        )
+        correct = 0 if length == 0 else weights[class_attribute == majority].sum()
         # class value = count
         distribution = Counter()
 
-        for value in metadata[data.columns[-1]]:
+        for value in range(metadata.class_length()):
             distribution[value] = weights[class_attribute == value].sum()
 
-        return Node(majority, tree, length - correct_predictions, length, distribution)
+        return Node(majority, tree, length - correct, length, distribution)
 
     # adjusts the instance weights based on missing values
-    missing = data[attribute].isna()
+    missing = data[:, attribute].isna()
     known_length = length - weights[missing].sum()
 
     # (count, adjusted count)
     distribution = []
 
-    if is_numeric_dtype(data[attribute]):
+    if metadata.is_numeric(attribute):
         # lower partition
-        count = weights[data[attribute] <= info[2]].sum()
+        count = weights[data[:, attribute] <= info[2]].sum()
         w = count / known_length
         adjusted_count = count + (weights[missing] * w).sum()
 
         distribution.append((count, adjusted_count))
 
         # upper partition
-        count = weights[data[attribute] > info[2]].sum()
+        count = weights[data[:, attribute] > info[2]].sum()
         w = count / known_length
         adjusted_count = count + (weights[missing] * w).sum()
 
         distribution.append((count, adjusted_count))
     else:
-        for value in metadata[attribute]:
-            count = weights[data[attribute] == value].sum()
+        for value in range(metadata.length(attribute)):
+            count = weights[data[:, attribute] == value].sum()
             w = count / known_length
             adjusted_count = count + (weights[missing] * w).sum()
 
@@ -1104,62 +1323,65 @@ def build_decision_tree(metadata, data, tree=None, parent_majority=None, weights
     node = None
 
     if valid < 2:
+        attributes[attribute] = False
         # not enough instances on branches, need to select another attribute
         return build_decision_tree(metadata,
-                                   data.drop(columns=attribute),
+                                   data,
                                    tree,
                                    parent_majority,
-                                   weights)
+                                   weights,
+                                   attributes)
     else:
         node = Node(attribute, parent=tree)
 
-        if is_numeric_dtype(data[attribute]):
+        if metadata.is_numeric(attribute):
             # continuous threshold value
             threshold = info[2]
 
             # slice if the data where the value <= threshold (lower)
-            partition = data[attribute] <= threshold
+            partition = data[:, attribute] <= threshold
 
             updated_weights = weights.copy()
             updated_weights[missing] = updated_weights[missing] * \
                 (distribution[0][0] / known_length)
             updated_weights = updated_weights[partition | missing]
 
-            branch_data = data[partition | missing].reset_index(drop=True)
+            #branch_data = data[partition | missing]
             child = build_decision_tree(
-                metadata, branch_data, node, majority, updated_weights)
+                metadata, data, node, majority, updated_weights, attributes)
             node.add(pre_prune(metadata, branch_data, majority, child, updated_weights),
                      threshold,
                      Operator.LESS_OR_EQUAL)
 
             # slice if the data where the value > threshold (upper)
-            partition = data[attribute] > threshold
+            partition = data[:, attribute] > threshold
 
             updated_weights = weights.copy()
             updated_weights[missing] = updated_weights[missing] * \
                 (distribution[1][0] / known_length)
             updated_weights = updated_weights[partition | missing]
 
-            branch_data = data[partition | missing].reset_index(drop=True)
+            branch_data = data[partition | missing]
             child = build_decision_tree(
-                metadata, branch_data, node, majority, updated_weights)
+                metadata, branch_data, node, majority, updated_weights, attributes)
             node.add(pre_prune(metadata, branch_data, majority, child, updated_weights),
                      threshold,
                      Operator.GREATER)
         else:
             # categorical split
-            for index, value in enumerate(metadata[attribute]):
-                partition = data[attribute] == value
+            for value in range(metadata.length(attribute)):
+                partition = data[:, attribute] == value
 
                 updated_weights = weights.copy()
                 updated_weights[missing] = updated_weights[missing] * \
                     (distribution[index][0] / known_length)
                 updated_weights = updated_weights[partition | missing]
 
-                branch_data = data[partition | missing].drop(
-                    columns=attribute).reset_index(drop=True)
+                branch_data = data[partition | missing]
+                attributes[attribute] = False
+
                 child = build_decision_tree(
-                    metadata, branch_data, node, majority, updated_weights)
+                    metadata, branch_data, node, majority, updated_weights, attributes)
                 node.add(pre_prune(metadata, branch_data, majority, child,
                          updated_weights), value, Operator.EQUAL)
 
@@ -1178,7 +1400,6 @@ def build_decision_tree(metadata, data, tree=None, parent_majority=None, weights
 #
 # Loaders
 # ---------
-
 
 def load_arff(path, class_attribute=None):
     """Loads the specified ARFF file into a Pandas DataFrame
@@ -1203,7 +1424,7 @@ def load_arff(path, class_attribute=None):
 
     columns = []     # list of attributes
     data_types = []  # data type of the attributes
-    data_domain = []  # domain of the attributes
+    data_domain = [] # domain of the attributes
 
     # opens the file for reading
     file = open(path, "r")
@@ -1253,16 +1474,16 @@ def load_arff(path, class_attribute=None):
     data[class_attribute] = class_column
 
     # attribute metadata information
-    metadata = {}
+    metadata = Metadata()
 
     for index, attribute in enumerate(columns):
         if data_types[index] is float:
             data_domain[index].append(data[attribute].min())
             data_domain[index].append(data[attribute].max())
 
-        metadata[attribute] = data_domain[index]
+        metadata.add(attribute, data_types[index], data_domain[index])
 
-    return metadata, data
+    return metadata, metadata.to_numpy(data)
 
 
 def load_csv(path, class_attribute=None):
@@ -1288,19 +1509,22 @@ def load_csv(path, class_attribute=None):
     data[class_attribute] = class_column
 
     # attribute metadata information
-    metadata = {}
+    metadata = Metadata()
 
     for attribute in data.columns:
-        data_domain = []
         if is_numeric_dtype(data[attribute]):
+            data_domain = []
             data_domain.append(data[attribute].min())
             data_domain.append(data[attribute].max())
+
+            metadata.add(attribute, float, data_domain)
         else:
             data_domain = data.loc[data[attribute].notna(), attribute].unique()
+            metadata.add(attribute, str, data_domain)
 
-        metadata[attribute] = data_domain
+    return metadata, metadata.to_numpy(data)
 
-    return metadata, data
+# CLI entry point
 
 
 if __name__ == "__main__":
@@ -1357,9 +1581,9 @@ if __name__ == "__main__":
     metadata, data = load_csv(
         args.training) if args.csv else load_arff(args.training)
 
-    print(f"\nClass specified by attribute '{data.columns[-1]}'")
+    print(f"\nClass specified by attribute '{metadata.attributes()[-1]}'")
     print(
-        f"\nRead {len(data)} cases ({len(metadata) - 1} predictor attributes) from:")
+        f"\nRead {len(data)} cases ({len(metadata.attributes()) - 1} predictor attributes) from:")
     print(f"    -> {args.training}")
     print("")
 
@@ -1418,3 +1642,4 @@ if __name__ == "__main__":
 
     elapsed = datetime.now() - start
     print("\n\nTime: {:.1f} secs".format(elapsed.total_seconds()))
+    
